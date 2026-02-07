@@ -148,6 +148,13 @@ def test_stream_function_computation():
     psi_diff = np.diff(psi, axis=1)
     assert np.allclose(psi_diff, psi_diff[0, 0], atol=1e-10), \
         "Stream function should increase uniformly for uniform flow"
+    
+    # Additional test: verify basic properties
+    # For u = constant, v = 0, the stream function should be monotonic in y
+    # Check that psi increases along y direction
+    psi_y_diff = np.diff(psi, axis=1)
+    assert np.all(psi_y_diff > 0), \
+        "Stream function should be monotonically increasing for positive u"
 
 
 if __name__ == "__main__":

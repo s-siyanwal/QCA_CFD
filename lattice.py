@@ -7,6 +7,9 @@ providing equilibrium distributions and macroscopic quantity computations.
 import numpy as np
 from typing import Tuple
 
+# Constants
+DENSITY_EPSILON = 1e-12  # Minimum density threshold to avoid division by zero
+
 
 class D2Q9Lattice:
     """D2Q9 lattice for 2D Lattice Boltzmann Method.
@@ -156,7 +159,7 @@ class D2Q9Lattice:
         rho = np.sum(f, axis=2)
         
         # Avoid division by zero
-        rho_safe = np.where(rho > 1e-12, rho, 1.0)
+        rho_safe = np.where(rho > DENSITY_EPSILON, rho, 1.0)
         
         # Momentum: sum of distributions weighted by lattice velocities
         u = np.sum(f * self.c[:, 0], axis=2) / rho_safe
