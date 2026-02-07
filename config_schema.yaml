@@ -1,0 +1,94 @@
+type: object
+required: [simulation, grid, physics, obstacles, boundary_conditions, solver, output, analysis]
+properties:
+  simulation:
+    type: object
+    required: [name, output_dir]
+    properties:
+      name:
+        type: string
+      output_dir:
+        type: string
+  grid:
+    type: object
+    required: [Nx, Ny, dx, dt]
+    properties:
+      Nx:
+        type: integer
+        minimum: 10
+      Ny:
+        type: integer
+        minimum: 10
+      dx:
+        type: number
+        exclusiveMinimum: 0
+      dt:
+        type: number
+        exclusiveMinimum: 0
+  physics:
+    type: object
+    required: [reynolds_number, characteristic_length, characteristic_velocity]
+    properties:
+      reynolds_number:
+        type: number
+        exclusiveMinimum: 0
+      characteristic_length:
+        type: number
+        exclusiveMinimum: 0
+      characteristic_velocity:
+        type: number
+        exclusiveMinimum: 0
+  obstacles:
+    type: array
+    items:
+      type: object
+      required: [type]
+      properties:
+        type:
+          type: string
+          enum: [circle, rectangle, naca]
+  boundary_conditions:
+    type: object
+    required: [inlet, outlet, top, bottom]
+  solver:
+    type: object
+    required: [max_iterations]
+    properties:
+      tau:
+        type: [number, 'null']
+        minimum: 0.5
+      max_iterations:
+        type: integer
+        minimum: 1
+      convergence_criterion:
+        type: number
+        exclusiveMinimum: 0
+      save_interval:
+        type: integer
+        minimum: 1
+  output:
+    type: object
+    properties:
+      save_fields:
+        type: boolean
+      save_forces:
+        type: boolean
+      save_vtk:
+        type: boolean
+      save_video:
+        type: boolean
+      video_fps:
+        type: integer
+        minimum: 1
+  analysis:
+    type: object
+    properties:
+      force_calculation_method:
+        type: string
+        enum: [momentum_exchange]
+      averaging_start_step:
+        type: integer
+        minimum: 0
+      fft_window:
+        type: string
+        enum: [hann, hamming, blackman, rectangular]
