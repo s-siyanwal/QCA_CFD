@@ -1,0 +1,49 @@
+simulation:
+  name: "cylinder_Re100_vortex_street"
+  output_dir: "./results/cylinder_re100/"
+
+grid:
+  Nx: 800
+  Ny: 400
+  dx: 1.0
+  dt: 1.0
+
+physics:
+  reynolds_number: 100.0
+  characteristic_length: 40.0
+  characteristic_velocity: 0.1
+
+obstacles:
+  - type: "circle"
+    center: [200, 200]
+    radius: 20.0
+
+boundary_conditions:
+  inlet:
+    type: "zou_he_velocity"
+    velocity: [0.1, 0.0]
+  outlet:
+    type: "convective"
+    convection_velocity: 0.1
+  top:
+    type: "periodic"
+  bottom:
+    type: "periodic"
+
+solver:
+  tau: null
+  max_iterations: 100000
+  convergence_criterion: 1.0e-6
+  save_interval: 100
+
+output:
+  save_fields: true
+  save_forces: true
+  save_vtk: true
+  save_video: true
+  video_fps: 30
+
+analysis:
+  force_calculation_method: "momentum_exchange"
+  averaging_start_step: 50000
+  fft_window: "hann"
