@@ -9,6 +9,9 @@ from pathlib import Path
 from typing import Dict, Any, Optional
 import jsonschema
 
+# Tolerance for numerical comparisons
+NU_TOLERANCE = 1e-6
+
 
 class ConfigManager:
     """Load, validate, and provide access to simulation configuration."""
@@ -35,7 +38,7 @@ class ConfigManager:
             FileNotFoundError: If config file doesn't exist
             yaml.YAMLError: If YAML is malformed
         """
-        if not os.path.exists(self.config_path):
+        if not Path(self.config_path).exists():
             raise FileNotFoundError(f"Configuration file not found: {self.config_path}")
             
         with open(self.config_path, 'r') as f:
@@ -84,7 +87,7 @@ class ConfigManager:
         else:
             tau = solver['tau']
             nu_computed = cs2 * (tau - 0.5)
-            if abs(nu - nu_computed) > 1e-6:
+            if abs(nu - nu_computed) > NU_TOLERANCE:
                 print(f"Warning: Provided tau={tau} gives nu={nu_computed:.6f}, "
                       f"but Re={Re} requires nu={nu:.6f}")
         

@@ -55,8 +55,10 @@ properties:
     required: [max_iterations]
     properties:
       tau:
-        type: [number, 'null']
-        minimum: 0.5
+        oneOf:
+          - type: number
+            minimum: 0.5
+          - type: "null"
       max_iterations:
         type: integer
         minimum: 1
