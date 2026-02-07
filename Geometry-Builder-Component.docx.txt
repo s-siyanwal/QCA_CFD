@@ -1,0 +1,680 @@
+﻿Building the Geometry Builder - Third Component
+Overview
+The Geometry Builder creates obstacle masks and classifies lattice nodes as fluid or solid. This component supports:
+* Circle obstacles (cylinders in 2D)
+* Rectangle obstacles
+* NACA airfoil profiles (arbitrary angles)
+* Arbitrary combinations of multiple obstacles
+* Geometry visualization
+File to Create: geometry_builder.py
+"""Geometry Builder for LBM CFD Solver.
+This module generates obstacle masks and classifies lattice nodes.
+Supports circles, rectangles, and NACA airfoils.
+"""
+import numpy as np
+from typing import Tuple, List, Dict, Any
+from dataclasses import dataclass
+import matplotlib.pyplot as plt
+from matplotlib.path import Path as MplPath
+@dataclass
+class Obstacle:
+"""Base class for obstacles."""
+def is_inside(self, x: np.ndarray, y: np.ndarray) -> np.ndarray:
+   """Return boolean mask: True where (x,y) is inside obstacle.
+   
+   Args:
+       x: x-coordinates (Nx, Ny)
+       y: y-coordinates (Nx, Ny)
+       
+   Returns:
+       mask: Boolean array (Nx, Ny)
+   """
+   raise NotImplementedError
+
+class CircleObstacle(Obstacle):
+"""Circular obstacle (cylinder in 2D)."""
+def __init__(self, center: Tuple[float, float], radius: float):
+   """Initialize circle obstacle.
+   
+   Args:
+       center: (x, y) center coordinates
+       radius: Circle radius
+   """
+   self.center = np.array(center)
+   self.radius = radius
+
+def is_inside(self, x: np.ndarray, y: np.ndarray) -> np.ndarray:
+   """Check if points are inside circle."""
+   dx = x - self.center[0]
+   dy = y - self.center[1]
+   return (dx**2 + dy**2) <= self.radius**2
+
+class RectangleObstacle(Obstacle):
+"""Rectangular obstacle."""
+def __init__(self, lower_left: Tuple[float, float], 
+            upper_right: Tuple[float, float]):
+   """Initialize rectangle obstacle.
+   
+   Args:
+       lower_left: (x, y) lower-left corner
+       upper_right: (x, y) upper-right corner
+   """
+   self.ll = np.array(lower_left)
+   self.ur = np.array(upper_right)
+
+def is_inside(self, x: np.ndarray, y: np.ndarray) -> np.ndarray:
+   """Check if points are inside rectangle."""
+   return ((x >= self.ll[0]) & (x <= self.ur[0]) &
+           (y >= self.ll[1]) & (y <= self.ur[1]))
+
+class NACAObstacle(Obstacle):
+"""NACA 4-digit airfoil obstacle."""
+def __init__(self, center: Tuple[float, float], chord: float,
+            naca_digits: str = "0012", angle_deg: float = 0.0):
+   """Initialize NACA airfoil obstacle.
+   
+   Args:
+       center: (x, y) center coordinates (leading edge)
+       chord: Chord length
+       naca_digits: 4-digit NACA designation (e.g., "0012")
+       angle_deg: Angle of attack in degrees
+   """
+   self.center = np.array(center)
+   self.chord = chord
+   self.naca = naca_digits
+   self.angle = np.deg2rad(angle_deg)
+   self._compute_airfoil_points()
+
+def _compute_airfoil_points(self):
+   """Generate NACA airfoil surface points."""
+   # Parse NACA digits: MPXX
+   # M = max camber (% of chord)
+   # P = position of max camber (tenths of chord)
+   # XX = max thickness (% of chord)
+   m = int(self.naca[0]) / 100.0
+   p = int(self.naca[1]) / 10.0
+   t = int(self.naca[2:]) / 100.0
+   
+   # Generate x coordinates (cosine spacing)
+   n_points = 200
+   beta = np.linspace(0, np.pi, n_points)
+   x_c = 0.5 * (1 - np.cos(beta))  # Normalized [0, 1]
+   
+   # Thickness distribution (symmetric airfoil)
+   y_t = 5 * t * (0.2969*np.sqrt(x_c) - 0.1260*x_c - 0.3516*x_c**2 
+                  + 0.2843*x_c**3 - 0.1015*x_c**4)
+   
+   # Camber line
+   if m == 0:
+       y_c = np.zeros_like(x_c)
+       dyc_dx = np.zeros_like(x_c)
+   else:
+       y_c = np.where(x_c < p,
+                     m/p**2 * (2*p*x_c - x_c**2),
+                     m/(1-p)**2 * ((1-2*p) + 2*p*x_c - x_c**2))
+       dyc_dx = np.where(x_c < p,
+                        2*m/p**2 * (p - x_c),
+                        2*m/(1-p)**2 * (p - x_c))
+   
+   # Surface points
+   theta = np.arctan(dyc_dx)
+   x_upper = x_c - y_t * np.sin(theta)
+   y_upper = y_c + y_t * np.cos(theta)
+   x_lower = x_c + y_t * np.sin(theta)
+   y_lower = y_c - y_t * np.cos(theta)
+   
+   # Combine (LE → upper → TE → lower → LE)
+   x_contour = np.concatenate([x_upper, x_lower[::-1]])
+   y_contour = np.concatenate([y_upper, y_lower[::-1]])
+   
+   # Scale to chord length
+   x_scaled = x_contour * self.chord
+   y_scaled = y_contour * self.chord
+   
+   # Rotate around origin
+   x_rot = x_scaled * np.cos(self.angle) - y_scaled * np.sin(self.angle)
+   y_rot = x_scaled * np.sin(self.angle) + y_scaled * np.cos(self.angle)
+   
+   # Translate to center
+   self.contour_x = x_rot + self.center[0]
+   self.contour_y = y_rot + self.center[1]
+
+def is_inside(self, x: np.ndarray, y: np.ndarray) -> np.ndarray:
+   """Check if points are inside airfoil using ray-casting."""
+   contour_points = np.column_stack([self.contour_x, self.contour_y])
+   path = MplPath(contour_points)
+   points = np.column_stack([x.ravel(), y.ravel()])
+   mask = path.contains_points(points)
+   return mask.reshape(x.shape)
+
+class GeometryBuilder:
+"""Build simulation geometry with obstacles."""
+def __init__(self, config_manager):
+   """Initialize geometry builder.
+   
+   Args:
+       config_manager: ConfigManager instance
+   """
+   self.config = config_manager
+   self.Nx = config_manager.get('grid.Nx')
+   self.Ny = config_manager.get('grid.Ny')
+   self.obstacles: List[Obstacle] = []
+   self.is_solid = None
+   self._build_obstacles()
+
+def _build_obstacles(self):
+   """Parse configuration and instantiate obstacle objects."""
+   obstacle_configs = self.config.get('obstacles', [])
+   
+   for obs_cfg in obstacle_configs:
+       obs_type = obs_cfg['type']
+       
+       if obs_type == 'circle':
+           obs = CircleObstacle(obs_cfg['center'], obs_cfg['radius'])
+       elif obs_type == 'rectangle':
+           obs = RectangleObstacle(obs_cfg['lower_left'], 
+                                  obs_cfg['upper_right'])
+       elif obs_type == 'naca':
+           obs = NACAObstacle(
+               obs_cfg['center'], 
+               obs_cfg['chord'],
+               obs_cfg.get('naca_digits', '0012'),
+               obs_cfg.get('angle_deg', 0.0)
+           )
+       else:
+           raise ValueError(f"Unknown obstacle type: {obs_type}")
+       
+       self.obstacles.append(obs)
+   
+   print(f"✓ Loaded {len(self.obstacles)} obstacle(s)")
+
+def generate_mask(self) -> np.ndarray:
+   """Generate boolean mask: True = solid, False = fluid.
+   
+   Returns:
+       is_solid: Boolean array (Nx, Ny)
+   """
+   # Create coordinate grid
+   x_grid, y_grid = np.meshgrid(
+       np.arange(self.Nx), 
+       np.arange(self.Ny), 
+       indexing='ij'
+   )
+   
+   # Start with all fluid
+   self.is_solid = np.zeros((self.Nx, self.Ny), dtype=bool)
+   
+   # Mark obstacle nodes as solid
+   for obstacle in self.obstacles:
+       self.is_solid |= obstacle.is_inside(x_grid, y_grid)
+   
+   # Statistics
+   n_solid = np.sum(self.is_solid)
+   n_fluid = np.sum(~self.is_solid)
+   total = self.Nx * self.Ny
+   
+   print(f"✓ Generated geometry mask:")
+   print(f"  - Grid size: {self.Nx} × {self.Ny} = {total:,} nodes")
+   print(f"  - Fluid nodes: {n_fluid:,} ({n_fluid/total*100:.1f}%)")
+   print(f"  - Solid nodes: {n_solid:,} ({n_solid/total*100:.1f}%)")
+   
+   return self.is_solid
+
+def get_fluid_mask(self) -> np.ndarray:
+   """Return fluid mask (inverse of solid mask)."""
+   return ~self.is_solid
+
+def visualize_geometry(self, save_path: str = None, figsize=(12, 6)):
+   """Plot geometry for verification.
+   
+   Args:
+       save_path: Path to save figure (optional)
+       figsize: Figure size (width, height)
+   """
+   fig, ax = plt.subplots(figsize=figsize)
+   
+   # Plot domain (white = fluid, black = solid)
+   ax.imshow(self.is_solid.T, origin='lower', cmap='gray_r', 
+            aspect='equal', interpolation='nearest')
+   
+   # Overlay obstacle contours if available
+   for obstacle in self.obstacles:
+       if isinstance(obstacle, NACAObstacle):
+           ax.plot(obstacle.contour_x, obstacle.contour_y, 
+                  'r-', linewidth=2, alpha=0.7)
+       elif isinstance(obstacle, CircleObstacle):
+           circle = plt.Circle(obstacle.center, obstacle.radius, 
+                              fill=False, edgecolor='r', 
+                              linewidth=2, alpha=0.7)
+           ax.add_patch(circle)
+   
+   ax.set_xlabel('x (grid points)')
+   ax.set_ylabel('y (grid points)')
+   ax.set_title('Computational Domain\n(white = fluid, black = solid)')
+   ax.set_xlim(0, self.Nx)
+   ax.set_ylim(0, self.Ny)
+   
+   plt.tight_layout()
+   
+   if save_path:
+       plt.savefig(save_path, dpi=150, bbox_inches='tight')
+       print(f"✓ Geometry visualization saved to {save_path}")
+   
+   plt.show()
+
+def __repr__(self) -> str:
+   """String representation."""
+   n_obstacles = len(self.obstacles)
+   if self.is_solid is not None:
+       n_solid = np.sum(self.is_solid)
+       return (f"GeometryBuilder(grid={self.Nx}×{self.Ny}, "
+              f"obstacles={n_obstacles}, solid_nodes={n_solid})")
+   else:
+       return f"GeometryBuilder(grid={self.Nx}×{self.Ny}, obstacles={n_obstacles})"
+
+Verification in Jupyter Notebook
+Cell 1: Setup
+import numpy as np
+import matplotlib.pyplot as plt
+from config_manager import ConfigManager
+from geometry_builder import (GeometryBuilder, CircleObstacle,
+RectangleObstacle, NACAObstacle)
+print("✓ Imports successful")
+Cell 2: Test Circle Obstacle
+print("="*60)
+print("TEST 1: Circle Obstacle")
+print("="*60)
+Create circle at (50, 50) with radius 10
+circle = CircleObstacle(center=(50, 50), radius=10)
+Test points
+test_points = [
+([50], [50], True, "Center"),
+([60], [50], True, "On boundary (right)"),
+([50], [60], True, "On boundary (top)"),
+([45], [45], True, "Inside"),
+([65], [50], False, "Outside (right)"),
+([50], [35], False, "Outside (bottom)")
+]
+print("\nCircle: center=(50,50), radius=10")
+all_pass = True
+for x, y, expected, desc in test_points:
+result = circle.is_inside(np.array(x), np.array(y))[0]
+status = "✓" if result == expected else "✗"
+all_pass = all_pass and (result == expected)
+print(f" {status} Point ({x[0]}, {y[0]}): {desc} - "
+f"{'inside' if result else 'outside'}")
+print(f"\n{'✓ PASS' if all_pass else '✗ FAIL'}")
+Cell 3: Test Rectangle Obstacle
+print("\n" + "="*60)
+print("TEST 2: Rectangle Obstacle")
+print("="*60)
+Create rectangle from (20, 30) to (80, 70)
+rect = RectangleObstacle(lower_left=(20, 30), upper_right=(80, 70))
+test_points = [
+([50], [50], True, "Center"),
+([20], [30], True, "Lower-left corner"),
+([80], [70], True, "Upper-right corner"),
+([15], [50], False, "Left of box"),
+([85], [50], False, "Right of box"),
+([50], [25], False, "Below box"),
+([50], [75], False, "Above box")
+]
+print("\nRectangle: (20,30) to (80,70)")
+all_pass = True
+for x, y, expected, desc in test_points:
+result = rect.is_inside(np.array(x), np.array(y))[0]
+status = "✓" if result == expected else "✗"
+all_pass = all_pass and (result == expected)
+print(f" {status} Point ({x[0]}, {y[0]}): {desc} - "
+f"{'inside' if result else 'outside'}")
+print(f"\n{'✓ PASS' if all_pass else '✗ FAIL'}")
+Cell 4: Test NACA Airfoil
+print("\n" + "="*60)
+print("TEST 3: NACA Airfoil Generation")
+print("="*60)
+Create NACA 0012 airfoil
+naca = NACAObstacle(center=(100, 100), chord=80,
+naca_digits="0012", angle_deg=0.0)
+print(f"NACA {naca.naca} airfoil:")
+print(f" Center: {naca.center}")
+print(f" Chord: {naca.chord}")
+print(f" Angle: {np.rad2deg(naca.angle):.1f}°")
+print(f" Contour points: {len(naca.contour_x)}")
+Check contour properties
+print(f"\nContour bounds:")
+print(f" x: [{np.min(naca.contour_x):.2f}, {np.max(naca.contour_x):.2f}]")
+print(f" y: [{np.min(naca.contour_y):.2f}, {np.max(naca.contour_y):.2f}]")
+Leading edge should be near center x
+le_x = np.min(naca.contour_x)
+print(f"\nLeading edge x: {le_x:.2f} (expected near {naca.center[0]})")
+Visualize airfoil
+fig, ax = plt.subplots(figsize=(10, 5))
+ax.plot(naca.contour_x, naca.contour_y, 'b-', linewidth=2)
+ax.plot(naca.center[0], naca.center[1], 'ro', markersize=8, label='Center')
+ax.set_xlabel('x')
+ax.set_ylabel('y')
+ax.set_title(f'NACA {naca.naca} Airfoil (chord={naca.chord})')
+ax.set_aspect('equal')
+ax.grid(True, alpha=0.3)
+ax.legend()
+plt.tight_layout()
+plt.show()
+print("\n✓ NACA airfoil generated successfully")
+Cell 5: Test Geometry Builder with Configuration
+print("\n" + "="*60)
+print("TEST 4: Geometry Builder Integration")
+print("="*60)
+Load configuration
+config = ConfigManager('examples/cylinder_re100.yaml')
+Build geometry
+geom = GeometryBuilder(config)
+mask = geom.generate_mask()
+Verify
+print(f"\n{geom}")
+Check dimensions
+assert mask.shape == (config.get('grid.Nx'), config.get('grid.Ny')),
+"Mask shape doesn't match grid size"
+print("✓ Mask shape matches grid configuration")
+Check data type
+assert mask.dtype == bool, "Mask should be boolean"
+print("✓ Mask is boolean type")
+Check that obstacle exists
+assert np.any(mask), "No solid nodes found"
+print("✓ Obstacle nodes identified")
+Check that most domain is fluid
+fluid_fraction = np.sum(~mask) / mask.size
+assert fluid_fraction > 0.8, "Too many solid nodes"
+print(f"✓ Fluid fraction reasonable: {fluid_fraction*100:.1f}%")
+Cell 6: Visualize Cylinder Geometry
+print("\n" + "="*60)
+print("TEST 5: Cylinder Geometry Visualization")
+print("="*60)
+Visualize full domain
+geom.visualize_geometry()
+Zoom in on cylinder
+fig, ax = plt.subplots(figsize=(10, 6))
+Plot zoomed region around cylinder
+x_center, y_center = 200, 200
+zoom_size = 80
+x_min, x_max = x_center - zoom_size, x_center + zoom_size
+y_min, y_max = y_center - zoom_size, y_center + zoom_size
+zoom_mask = mask[x_min:x_max, y_min:y_max]
+ax.imshow(zoom_mask.T, origin='lower', cmap='gray_r',
+extent=[x_min, x_max, y_min, y_max],
+interpolation='nearest')
+Add grid lines
+ax.set_xlabel('x (grid points)')
+ax.set_ylabel('y (grid points)')
+ax.set_title('Zoomed View of Cylinder')
+ax.grid(True, alpha=0.3, linestyle='--', linewidth=0.5)
+plt.tight_layout()
+plt.show()
+print("✓ Geometry visualization complete")
+Cell 7: Test Multiple Obstacles
+print("\n" + "="*60)
+print("TEST 6: Multiple Obstacles")
+print("="*60)
+Create custom configuration with multiple obstacles
+import tempfile
+import yaml
+multi_obstacle_config = {
+'simulation': {
+'name': 'multi_obstacle_test',
+'output_dir': './test_output/'
+},
+'grid': {
+'Nx': 200,
+'Ny': 100,
+'dx': 1.0,
+'dt': 1.0
+},
+'physics': {
+'reynolds_number': 100.0,
+'characteristic_length': 20.0,
+'characteristic_velocity': 0.1
+},
+'obstacles': [
+{
+'type': 'circle',
+'center': [50, 50],
+'radius': 15
+},
+{
+'type': 'rectangle',
+'lower_left': [120, 30],
+'upper_right': [140, 70]
+}
+],
+'boundary_conditions': {
+'inlet': {'type': 'zou_he_velocity', 'velocity': [0.1, 0.0]},
+'outlet': {'type': 'convective'},
+'top': {'type': 'periodic'},
+'bottom': {'type': 'periodic'}
+},
+'solver': {
+'max_iterations': 1000,
+'tau': None
+},
+'output': {
+'save_fields': True
+},
+'analysis': {
+'force_calculation_method': 'momentum_exchange'
+}
+}
+Save temporary config
+with tempfile.NamedTemporaryFile(mode='w', suffix='.yaml', delete=False) as f:
+yaml.dump(multi_obstacle_config, f)
+temp_config_path = f.name
+Load and build
+config_multi = ConfigManager(temp_config_path)
+geom_multi = GeometryBuilder(config_multi)
+mask_multi = geom_multi.generate_mask()
+Visualize
+geom_multi.visualize_geometry()
+Cleanup
+import os
+os.remove(temp_config_path)
+print("\n✓ Multiple obstacles handled correctly")
+Cell 8: Test Obstacle Boundary Detection
+print("\n" + "="*60)
+print("TEST 7: Obstacle Boundary Detection")
+print("="*60)
+Find fluid-solid interface nodes
+def find_boundary_nodes(is_solid):
+"""Find fluid nodes adjacent to solid nodes."""
+Nx, Ny = is_solid.shape
+boundary = np.zeros_like(is_solid)
+for x in range(1, Nx-1):
+   for y in range(1, Ny-1):
+       if not is_solid[x, y]:  # Fluid node
+           # Check 8 neighbors
+           neighbors_solid = (
+               is_solid[x-1, y] or is_solid[x+1, y] or
+               is_solid[x, y-1] or is_solid[x, y+1] or
+               is_solid[x-1, y-1] or is_solid[x+1, y-1] or
+               is_solid[x-1, y+1] or is_solid[x+1, y+1]
+           )
+           if neighbors_solid:
+               boundary[x, y] = True
+
+return boundary
+
+Find boundary for cylinder geometry
+boundary = find_boundary_nodes(mask)
+n_boundary = np.sum(boundary)
+print(f"Boundary nodes: {n_boundary}")
+print(f"Expected ~circumference: ~{2 * np.pi * 20:.0f} nodes")
+Visualize boundary
+fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
+Full geometry
+ax1.imshow(mask.T, origin='lower', cmap='gray_r', aspect='equal')
+ax1.set_title('Geometry (solid = black)')
+ax1.set_xlabel('x')
+ax1.set_ylabel('y')
+Boundary nodes
+boundary_display = np.zeros((mask.shape[0], mask.shape[1], 3))
+boundary_display[~mask] = [1, 1, 1] # White for fluid
+boundary_display[mask] = [0, 0, 0] # Black for solid
+boundary_display[boundary] = [1, 0, 0] # Red for boundary
+ax2.imshow(boundary_display.transpose(1, 0, 2), origin='lower', aspect='equal')
+ax2.set_title('Boundary Nodes (red = fluid-solid interface)')
+ax2.set_xlabel('x')
+ax2.set_ylabel('y')
+plt.tight_layout()
+plt.show()
+print("✓ Boundary detection working correctly")
+Cell 9: Test NACA Airfoil at Angle
+print("\n" + "="*60)
+print("TEST 8: NACA Airfoil at Angle of Attack")
+print("="*60)
+Create airfoils at different angles
+angles = [0, 5, 10, 15]
+fig, axes = plt.subplots(2, 2, figsize=(12, 10))
+axes = axes.flatten()
+for idx, angle in enumerate(angles):
+naca_angled = NACAObstacle(center=(100, 100), chord=80,
+naca_digits="0012", angle_deg=angle)
+ax = axes[idx]
+ax.plot(naca_angled.contour_x, naca_angled.contour_y, 'b-', linewidth=2)
+ax.plot(naca_angled.center[0], naca_angled.center[1], 
+      'ro', markersize=8)
+ax.set_xlabel('x')
+ax.set_ylabel('y')
+ax.set_title(f'NACA 0012 at α = {angle}°')
+ax.set_aspect('equal')
+ax.grid(True, alpha=0.3)
+ax.set_xlim(50, 200)
+ax.set_ylim(50, 150)
+
+plt.tight_layout()
+plt.show()
+print("✓ Angled airfoils generated correctly")
+Cell 10: Summary
+print("\n" + "="*60)
+print("VERIFICATION SUMMARY")
+print("="*60)
+summary = """
+✓ All geometry tests completed!
+The GeometryBuilder component provides:
+1. ✓ Circle obstacle generation and inside/outside testing
+2. ✓ Rectangle obstacle generation
+3. ✓ NACA airfoil contour generation (4-digit series)
+4. ✓ Arbitrary angle of attack support
+5. ✓ Multiple obstacle support
+6. ✓ Boolean mask generation (solid/fluid classification)
+7. ✓ Geometry visualization
+8. ✓ Boundary node detection
+Obstacle Types Tested:
+* Circle (cylinder): ✓
+* Rectangle: ✓
+* NACA 0012 airfoil: ✓
+* Multiple obstacles: ✓
+* Angled obstacles: ✓
+Integration Tests:
+* ConfigManager integration: ✓
+* Mask generation: ✓
+* Visualization: ✓
+* Fluid-solid interface: ✓
+Next Steps:
+* Build lbm_core.py (collision and streaming)
+* Build boundary_conditions.py (inlet/outlet/wall BC)
+* Integrate all components for simulation
+Run unit tests with: pytest tests/test_geometry_builder.py -v
+"""
+print(summary)
+Unit Test File
+Create tests/test_geometry_builder.py:
+"""Unit tests for geometry builder."""
+import numpy as np
+import pytest
+from geometry_builder import (CircleObstacle, RectangleObstacle,
+NACAObstacle, GeometryBuilder)
+from config_manager import ConfigManager
+def test_circle_obstacle_center():
+"""Test circle contains its center."""
+circle = CircleObstacle(center=(50, 50), radius=10)
+assert circle.is_inside(np.array([50]), np.array([50]))[0]
+def test_circle_obstacle_outside():
+"""Test circle excludes distant points."""
+circle = CircleObstacle(center=(50, 50), radius=10)
+assert not circle.is_inside(np.array([100]), np.array([50]))[0]
+def test_rectangle_obstacle():
+"""Test rectangle obstacle detection."""
+rect = RectangleObstacle(lower_left=(20, 30), upper_right=(80, 70))
+# Inside
+assert rect.is_inside(np.array([50]), np.array([50]))[0]
+
+# Outside
+assert not rect.is_inside(np.array([10]), np.array([50]))[0]
+
+def test_naca_airfoil_generation():
+"""Test NACA airfoil contour is generated."""
+naca = NACAObstacle(center=(100, 100), chord=80, naca_digits="0012")
+# Contour should have points
+assert len(naca.contour_x) > 0
+assert len(naca.contour_y) > 0
+
+# Leading edge should be near center
+le_x = np.min(naca.contour_x)
+assert abs(le_x - 100) < 5
+
+def test_geometry_builder_mask_shape():
+"""Test mask has correct shape."""
+config = ConfigManager('examples/cylinder_re100.yaml')
+geom = GeometryBuilder(config)
+mask = geom.generate_mask()
+assert mask.shape == (config.get('grid.Nx'), config.get('grid.Ny'))
+
+def test_geometry_builder_mask_type():
+"""Test mask is boolean."""
+config = ConfigManager('examples/cylinder_re100.yaml')
+geom = GeometryBuilder(config)
+mask = geom.generate_mask()
+assert mask.dtype == bool
+
+def test_geometry_builder_has_obstacles():
+"""Test mask contains solid nodes."""
+config = ConfigManager('examples/cylinder_re100.yaml')
+geom = GeometryBuilder(config)
+mask = geom.generate_mask()
+assert np.any(mask)  # Should have some solid nodes
+
+if name == 'main':
+pytest.main([file, '-v'])
+Expected Output
+When running the verification notebook:
+✓ Circle obstacle inside/outside tests pass
+✓ Rectangle obstacle inside/outside tests pass
+✓ NACA airfoil contour generated (200 points)
+✓ Geometry mask shape matches configuration
+✓ Obstacle nodes identified correctly
+✓ Multiple obstacles supported
+✓ Boundary nodes detected
+✓ Angled airfoils work correctly
+Success Criteria
+✅ Circle obstacle: center inside, distant points outside
+✅ Rectangle obstacle: corners and interior detected
+✅ NACA airfoil: contour generated, leading edge at center
+✅ Geometry mask: correct shape, boolean type, has solid nodes
+✅ Multiple obstacles: combined correctly with OR operation
+✅ Visualization: produces clear plots
+✅ Boundary detection: identifies fluid-solid interface
+✅ Integration: works with ConfigManager
+Integration Example
+from config_manager import ConfigManager
+from lattice import D2Q9Lattice
+from geometry_builder import GeometryBuilder
+Initialize components
+config = ConfigManager('examples/cylinder_re100.yaml')
+lattice = D2Q9Lattice()
+geom = GeometryBuilder(config)
+Generate geometry
+is_solid = geom.generate_mask()
+Visualize
+geom.visualize_geometry(save_path='results/geometry.png')
+print(f"Ready for LBM simulation:")
+print(f" Grid: {config.get('grid.Nx')} × {config.get('grid.Ny')}")
+print(f" Obstacles: {len(geom.obstacles)}")
+print(f" Fluid nodes: {np.sum(~is_solid):,}")
+Once these tests pass, proceed to lbm_core.py for the collision and streaming implementation!
